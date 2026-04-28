@@ -1540,10 +1540,6 @@ PAGES = {
 
 page_names = list(PAGES.keys())
 
-# Keep radio in sync with _nav (navigate_to sets both)
-if st.session_state.get("_nav") in page_names:
-    st.session_state["_radio_nav"] = st.session_state["_nav"]
-
 with st.sidebar:
     # Units toggle — top of sidebar
     st.markdown("### \U0001f4d0 Display units")
