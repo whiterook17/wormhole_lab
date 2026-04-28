@@ -12,3 +12,4 @@ runs/
 .pytest_cache/
 .coverage
 htmlcov/
+.streamlit/usage.json
