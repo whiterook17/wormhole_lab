@@ -1,4 +1,8 @@
-"""Verification suite: 40 self-consistency checks across all physics modules."""
+"""Verification suite: physics self-consistency checks across all modules.
+
+v2 additions: run_model_checks() applies a common protocol test to every
+registered GravityModel so new models get automatic coverage.
+"""
 
 import math
 import numpy as np
@@ -204,4 +208,63 @@ def run_all(M=1.0):
         cr.check(f"tau_ratio matches suppression a={a_frac}M",
                  float(expected_ratio), float(ratio), tol=1e-8, section=s)
 
+    # ── MODEL PROTOCOL ────────────────────────────────────────────────────────
+    from physics.models import MODEL_REGISTRY
+    run_model_checks(cr, MODEL_REGISTRY)
+
     return cr
+
+
+def run_model_checks(cr: CheckRunner, registry: dict, r0: float = 1.2) -> None:
+    """Apply common GravityModel protocol checks to every registered model.
+
+    Skips stub models that raise NotImplementedError.
+    Each registered model must:
+      1. Have a non-empty name attribute.
+      2. Return a StressEnergy with finite values on a grid.
+      3. Report NEC violation at the throat (nec_at_throat < 0).
+      4. Report is_traversable() == True.
+    """
+    from physics.model import GravityModel, StressEnergy
+    import numpy as np
+
+    gr_params  = {"r0": r0, "shape": "power"}
+    fr_params  = {"r0": r0, "shape": "power", "alpha": 0.15}
+    model_params = {"GR": gr_params, "fR": fr_params}
+
+    for model_name, model in registry.items():
+        s = f"Model:{model_name}"
+        params = model_params.get(model_name, gr_params)
+
+        # Protocol check
+        cr.check(f"{model_name} implements GravityModel",
+                 True, isinstance(model, GravityModel),
+                 condition="bool", section=s)
+        cr.check(f"{model_name} has non-empty name",
+                 True, bool(getattr(model, "name", "")),
+                 condition="bool", section=s)
+
+        # Skip stubs
+        try:
+            nec = model.nec_at_throat(params)
+        except NotImplementedError:
+            continue
+        except Exception as exc:
+            cr.check(f"{model_name} nec_at_throat no crash", True, False,
+                     condition="bool", section=s)
+            continue
+
+        cr.check(f"{model_name} nec_at_throat < 0", 0.0, nec,
+                 condition="negative", section=s)
+        cr.check(f"{model_name} is_traversable", True, model.is_traversable(params),
+                 condition="bool", section=s)
+
+        r_arr = np.linspace(r0, 5.0 * r0, 30)
+        try:
+            se = model.stress_energy(r_arr, params)
+            cr.check(f"{model_name} stress_energy finite",
+                     True, bool(np.all(np.isfinite(se.rho))),
+                     condition="bool", section=s)
+        except Exception:
+            cr.check(f"{model_name} stress_energy no crash", True, False,
+                     condition="bool", section=s)

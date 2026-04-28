@@ -69,15 +69,18 @@ def isco_radius(M, a, prograde=True):
 
 
 def kerr_suppression(a, M):
-    """√(1 − a²/M²).
+    """sqrt(1 - a^2/M^2).
 
     Dimensionless factor reducing exotic-matter density at throat.
-    Returns 1 if M=0. Clips a/M to [0, 1−ε].
+    Fully vectorised: a and M may both be numpy arrays.
+    Returns 1 where M=0. Clips |a/M| to [0, 1-EPS].
     """
-    if M == 0:
-        return 1.0
-    ratio = np.clip(np.abs(a) / np.abs(M), 0.0, 1.0 - EPS)
-    return np.sqrt(1.0 - ratio**2)
+    a = np.asarray(a, dtype=float)
+    M = np.asarray(M, dtype=float)
+    safe_M = np.where(np.abs(M) < EPS, 1.0, M)           # avoid divide-by-zero
+    ratio = np.clip(np.abs(a) / np.abs(safe_M), 0.0, 1.0 - EPS)
+    result = np.sqrt(1.0 - ratio**2)
+    return np.where(np.abs(M) < EPS, 1.0, result)         # M=0 → 1
 
 
 def tau_static(r0):

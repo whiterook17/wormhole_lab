@@ -1,0 +1,51 @@
+name: Tests
+
+on:
+  push:
+    branches: ["main", "dev"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run physics verification suite
+        run: |
+          python -c "
+          import sys; sys.path.insert(0, '.')
+          from verification.run_checks import run_all
+          cr = run_all()
+          s = cr.summary()
+          print(f'Verification: {s[\"n_pass\"]}/{s[\"total\"]} passed')
+          if not s['all_passed']:
+              sys.exit(1)
+          "
+
+      - name: Run pytest
+        run: python -m pytest tests/ -v --tb=short --cov=physics --cov=verification --cov-report=term-missing
+
+      - name: Compile-check all modules
+        run: |
+          for f in physics/constants.py physics/kerr.py physics/morris_thorne.py \
+                   physics/energy_conditions.py physics/throat_dynamics.py \
+                   physics/fR_gravity.py physics/cache.py physics/model.py \
+                   physics/solvers.py physics/parameter_explorer.py \
+                   physics/models/general_relativity.py \
+                   physics/models/fR_gravity.py \
+                   physics/models/gauss_bonnet.py \
+                   storage/run.py storage/json_backend.py \
+                   verification/run_checks.py app.py; do
+            python -m py_compile "$f" && echo "OK: $f"
+          done

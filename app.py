@@ -33,6 +33,30 @@ from physics.fR_gravity import (
 )
 from verification.run_checks import run_all
 
+# Storage (history system — never crashes the app on failure)
+try:
+    from storage.run import Run
+    from storage import save_run, load_all_runs
+    _STORAGE_OK = True
+except Exception:
+    _STORAGE_OK = False
+    def save_run(run): pass
+    def load_all_runs(): return []
+
+# ── Auto-save helper ──────────────────────────────────────────────────────────
+
+def _auto_save(model_name: str, params: dict, results: dict,
+               convergence: dict | None = None) -> None:
+    """Create and persist a Run record.  Silent on failure."""
+    if not _STORAGE_OK:
+        return
+    try:
+        run = Run.create(model_name, params, results, convergence)
+        save_run(run)
+    except Exception:
+        pass
+
+
 # ── Colour palette ────────────────────────────────────────────────────────────
 TEAL   = "#00c8c8"
 GOLD   = "#e8a020"
@@ -423,6 +447,10 @@ def page_verification():
             try:
                 cr = run_all()
                 st.session_state["last_checks"] = cr
+                s = cr.summary()
+                _auto_save("Verification", {},
+                           {"n_pass": s["n_pass"], "n_fail": s["n_fail"],
+                            "total": s["total"], "all_passed": s["all_passed"]})
             except Exception as e:
                 st.error(f"Error running checks: {e}")
                 return
@@ -839,6 +867,13 @@ def page_fR():
                     st.success("ODE solved successfully.")
                 else:
                     st.warning("ODE solver did not fully converge.")
+                _auto_save(
+                    "fR",
+                    {"r0": r0_fr, "r_max": r_max, "alpha": alpha, "phi0": phi0},
+                    {"phi_final": float(phi_arr[-1]) if len(phi_arr) > 0 else None,
+                     "success": sol.success},
+                    {"n_steps": len(r_arr), "method": "RK45"},
+                )
             except Exception as e:
                 st.error(f"ODE solve failed: {e}")
 
@@ -923,6 +958,133 @@ def page_fR():
     show_footer()
 
 
+# ── Page 6 — History ─────────────────────────────────────────────────────────
+
+def page_history():
+    st.header("Run History")
+
+    if not _STORAGE_OK:
+        st.warning("Storage module unavailable — history disabled.")
+        show_footer()
+        return
+
+    runs = load_all_runs()
+
+    # ── Sidebar filters ───────────────────────────────────────────────────────
+    with st.sidebar:
+        st.markdown("### Filters")
+        all_models = sorted({r.model for r in runs}) if runs else []
+        model_filter = st.selectbox("Model", ["All"] + all_models)
+        date_from = st.text_input("Date from (YYYY-MM-DD)", "")
+        date_to   = st.text_input("Date to   (YYYY-MM-DD)", "")
+        tag_filter = st.text_input("Tag contains", "")
+        nec_only = st.checkbox("NEC violated runs only")
+
+    filtered = runs
+    if model_filter != "All":
+        filtered = [r for r in filtered if r.model == model_filter]
+    if date_from:
+        filtered = [r for r in filtered if r.timestamp >= date_from]
+    if date_to:
+        filtered = [r for r in filtered if r.timestamp <= date_to]
+    if tag_filter:
+        filtered = [r for r in filtered if tag_filter in r.tags]
+    if nec_only:
+        filtered = [r for r in filtered if r.results.get("nec_at_throat", 0) < 0
+                    or r.results.get("nec_violation", 0) < 0]
+
+    if not filtered:
+        st.info("No runs recorded yet. Use Solve / Run Checks on any page to auto-save.")
+        show_footer()
+        return
+
+    import pandas as pd
+    rows = [r.flat_dict() for r in filtered]
+    df = pd.DataFrame(rows)
+
+    # Show summary metrics
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total runs", len(filtered))
+    c2.metric("Models", len({r.model for r in filtered}))
+    c3.metric("Latest", filtered[0].timestamp[:16] if filtered else "—")
+
+    st.divider()
+    st.dataframe(df, use_container_width=True)
+
+    # ── Compare two runs side-by-side ─────────────────────────────────────────
+    st.divider()
+    st.markdown("### Diff — compare two runs")
+    run_ids = [r.run_id for r in filtered]
+    run_labels = [f"{r.run_id} | {r.model} | {r.timestamp[:16]}" for r in filtered]
+
+    if len(run_ids) >= 2:
+        col_l, col_r = st.columns(2)
+        with col_l:
+            pick_a = st.selectbox("Run A", run_labels, index=0, key="hist_a")
+        with col_r:
+            pick_b = st.selectbox("Run B", run_labels,
+                                   index=min(1, len(run_labels) - 1), key="hist_b")
+
+        idx_a = run_labels.index(pick_a)
+        idx_b = run_labels.index(pick_b)
+        ra, rb = filtered[idx_a], filtered[idx_b]
+
+        col_l, col_r = st.columns(2)
+        with col_l:
+            st.markdown(f"**{ra.run_id}** — {ra.model} — {ra.timestamp[:16]}")
+            st.json({"params": ra.params, "results": ra.results}, expanded=False)
+        with col_r:
+            st.markdown(f"**{rb.run_id}** — {rb.model} — {rb.timestamp[:16]}")
+            st.json({"params": rb.params, "results": rb.results}, expanded=False)
+
+    # ── Export ────────────────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### Export")
+    col_l, col_r = st.columns(2)
+    with col_l:
+        try:
+            from storage.json_backend import JSONBackend
+            backend = JSONBackend()
+            all_ids = [r.run_id for r in filtered]
+            st.download_button(
+                "Download selected as JSON",
+                data=backend.export_json(all_ids),
+                file_name="wormhole_runs.json",
+                mime="application/json",
+            )
+        except Exception as e:
+            st.warning(f"JSON export unavailable: {e}")
+    with col_r:
+        try:
+            from storage.json_backend import JSONBackend
+            backend = JSONBackend()
+            csv_data = backend.export_csv([r.run_id for r in filtered])
+            st.download_button(
+                "Download selected as CSV",
+                data=csv_data,
+                file_name="wormhole_runs.csv",
+                mime="text/csv",
+            )
+        except Exception as e:
+            st.warning(f"CSV export unavailable: {e}")
+
+    # ── Delete ────────────────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### Delete a run")
+    del_id = st.selectbox("Run to delete", ["— select —"] + run_ids, key="hist_del")
+    if del_id != "— select —":
+        if st.button(f"Delete {del_id}", type="secondary"):
+            try:
+                from storage.json_backend import JSONBackend
+                JSONBackend().delete(del_id)
+                st.success(f"Deleted run {del_id}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Delete failed: {e}")
+
+    show_footer()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -940,13 +1102,14 @@ PAGES = {
     "📐 Wormhole & NEC": page_wormhole_nec,
     "📡 Throat & Echo": page_throat_echo,
     "🔭 f(R) Gravity": page_fR,
+    "📚 History": page_history,
 }
 
 with st.sidebar:
     st.markdown("## Navigation")
     selected = st.radio("", list(PAGES.keys()), label_visibility="collapsed")
     st.divider()
-    st.caption("Wormhole Math Checker v1.0")
+    st.caption("Wormhole Math Checker v2.0")
     st.caption("Against Chronology Protection")
 
 PAGES[selected]()
